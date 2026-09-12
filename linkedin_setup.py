@@ -1,11 +1,11 @@
-"""
-Run this once to fill LinkedIn values into .env
+"""Run this once to fill LinkedIn values into .env
 
-  pip install requests python-dotenv
+  pip install -r requirements.txt
   python linkedin_setup.py
 """
 
 import os
+from datetime import datetime, timezone
 
 import requests
 from dotenv import load_dotenv, set_key
@@ -16,6 +16,13 @@ CLIENT_ID = os.getenv("LINKEDIN_CLIENT_ID", "")
 CLIENT_SECRET = os.getenv("LINKEDIN_CLIENT_SECRET", "")
 REDIRECT = os.getenv("LINKEDIN_REDIRECT_URI", "http://localhost:8000/callback")
 ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
+
+
+def mask_secret(value: str) -> str:
+    if len(value) <= 8:
+        return "***"
+    return f"{value[:4]}...{value[-4:]} ({len(value)} chars)"
+
 
 if not CLIENT_ID or not CLIENT_SECRET:
     raise SystemExit(
@@ -46,7 +53,11 @@ token_res = requests.post(
     timeout=30,
 )
 token_res.raise_for_status()
-token = token_res.json()["access_token"]
+token_data = token_res.json()
+token = token_data["access_token"]
+expires_at = int(datetime.now(timezone.utc).timestamp()) + int(
+    token_data.get("expires_in", 5184000)
+)
 
 me = requests.get(
     "https://api.linkedin.com/v2/userinfo",
@@ -58,9 +69,11 @@ author = f"urn:li:person:{me.json()['sub']}"
 
 set_key(ENV_PATH, "LINKEDIN_ACCESS_TOKEN", token)
 set_key(ENV_PATH, "LINKEDIN_AUTHOR_URN", author)
+set_key(ENV_PATH, "LINKEDIN_TOKEN_EXPIRES_AT", str(expires_at))
 
-print("\nSaved to .env:\n")
-print(f"LINKEDIN_ACCESS_TOKEN = {token}")
+print("\nSaved to .env (token value is not printed):\n")
+print(f"LINKEDIN_ACCESS_TOKEN = {mask_secret(token)}")
 print(f"LINKEDIN_AUTHOR_URN   = {author}")
-print("\nCopy the same two keys into Agentverse → your agent → .env / Secrets.")
+print("\nCopy the same keys into Agentverse → your agent → Secrets.")
+print("Do not paste tokens into chat, screenshots, or git commits.")
 print("Tokens last about 60 days. Re-run this script when posting starts failing.")

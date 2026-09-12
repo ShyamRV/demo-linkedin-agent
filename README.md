@@ -1,465 +1,456 @@
 # LinkedIn Buddy
 
-Workshop guide: build a Fetch.ai agent that writes a LinkedIn post with **ASI:One**, generates an image with **ASI:One**, and publishes it every day at **6:00 PM IST**.
+An interactive Fetch.ai agent that creates **highly professional** LinkedIn
+content with ASI:One, shows a review card, waits for approval, generates an
+image, and publishes to a personal LinkedIn profile.
 
-You can chat with it on Agentverse / ASI:One using the **Chat Protocol**.
+Scheduled drafts are **never published without approval**.
 
-Works on **Windows** and **Mac**. Use the command for your computer.
+Repository:
+[github.com/ShyamRV/demo-linkedin-agent](https://github.com/ShyamRV/demo-linkedin-agent)
 
-Repo: [github.com/ShyamRV/demo-linkedin-agent](https://github.com/ShyamRV/demo-linkedin-agent)
+License: [MIT](LICENSE)
 
----
+## Features
 
-## Before you start
+- ASI:One post and image generation
+- Agentverse Agent Chat Protocol
+- Interactive create, settings, and review cards
+- Edit, regenerate, approve, or cancel a draft
+- Persistent preferences, drafts, schedule, and post history
+- Daily approval-first drafts with a claimed schedule owner
+- Pause, resume, and change the schedule through chat
+- Current LinkedIn Images and Posts APIs (`202608`)
+- Retries for rate limits and temporary LinkedIn failures
+- Safe `@Name` mentions without raw `urn:li:...` markup in the feed
+- Poster framing that crops and covers common model corner badges
 
-| You use | Open this app |
-| --- | --- |
-| **Windows** | PowerShell |
-| **Mac** | Terminal |
+## LinkedIn mentions
 
-On Windows, `python` is the usual command.  
-On Mac, `python3` is the usual command.
+By default, drafts may mention these **organizations** when the exact name
+already appears in the post text:
 
-If a command fails, try the other one (`python` vs `python3`).
+- **Fetch.ai** → `@Fetch.ai`
+- **Fetch.ai Innovation Lab** → `@Fetch.ai Innovation Lab`
 
----
+Important limits for a personal **Share on LinkedIn** app:
 
-## What you will build
+- The agent writes visible `@Name` text.
+- It does **not** insert Little Text `@[Name](urn:...)` into the post, because
+  that markup has been showing up as raw code in the feed.
+- These are not guaranteed blue notify-tags. Treat them as readable mentions.
+
+**Person mentions are opt-in.** Sana Wajid is available in the create form but
+unchecked by default. Do not enable person mentions unless you intend to
+mention that person from your account. Leave `SANA_WAJID_URN` empty unless you
+have a reason and consent to configure it.
+
+Names that do not appear in the draft are **not** appended at the bottom.
+
+Relevant profiles:
+
+- [Fetch.ai](https://www.linkedin.com/company/fetch-ai/)
+- [Fetch.ai Innovation Lab](https://www.linkedin.com/company/fetch-ai-innovation-lab/)
+- [Sana Wajid](https://www.linkedin.com/in/sana-wajid-ab1b6169/) (opt-in only)
+
+## Project structure
 
 ```text
-You (chat)  -->  LinkedIn Buddy (uAgent)
-                      |
-                      +--> ASI:One writes the post
-                      +--> ASI:One generates an image
-                      +--> LinkedIn API publishes it
-                      +--> every day at 6:00 PM it posts by itself
+agent.py             Agentverse handlers, workflow, schedule, storage
+cards.py             Interactive Agentverse cards
+config.py            Environment settings and mention definitions
+content.py           ASI:One post and image generation
+linkedin.py          LinkedIn Images and Posts API
+linkedin_setup.py    One-time LinkedIn login helper
+visual.py            Poster framing, mascot, and model-badge scrubbing
+tests/               Unit tests that never publish to LinkedIn
+.env.example         Configuration template
+requirements.txt     Pinned Python dependencies
+LICENSE              MIT license
+CONTRIBUTING.md      Contribution and security notes
+.github/workflows/   CI unit tests
 ```
 
-| Piece | What it does |
-| --- | --- |
-| **uAgents** | Agent framework (Fetch.ai) |
-| **Agentverse** | Host / discover / chat with the agent |
-| **Chat Protocol** | Lets ASI:One and Agentverse talk to the agent |
-| **ASI:One** (`asi1.ai`) | Writes the post + generates the image |
-| **LinkedIn UGC API** | Publishes the post on your profile |
+## 1. Create the required accounts
 
----
+### Agentverse
 
-## Accounts you need (create these first)
+Create an account at [agentverse.ai](https://agentverse.ai).
 
-Do these **before** writing any code.
+### ASI:One
 
-### 1. Fetch.ai / Agentverse
+Create an API key at [asi1.ai/developer](https://asi1.ai/developer).
 
-1. Open [agentverse.ai](https://agentverse.ai)
-2. Sign up / log in
-3. Keep this tab open
+### LinkedIn
 
-### 2. ASI:One API key
-
-1. Open [asi1.ai](https://asi1.ai) and sign in
-2. Go to [asi1.ai/developer](https://asi1.ai/developer)
-3. Create an API key
-4. Copy it. It looks like `sk_...`
-5. You will paste it into `.env` as `ASI1_API_KEY`
-
-Hosted agents on Agentverse already get this key. You still need it for **local** runs.
-
-### 3. LinkedIn Developer App
-
-1. Open [linkedin.com/developers/apps](https://www.linkedin.com/developers/apps)
-2. Click **Create app**
-3. Add a name, LinkedIn page, and logo
-4. Open **Products** and enable:
+1. Create an app at
+   [linkedin.com/developers/apps](https://www.linkedin.com/developers/apps).
+2. Enable:
    - **Sign In with LinkedIn using OpenID Connect**
    - **Share on LinkedIn**
-5. Open **Auth**
-6. Copy **Client ID** and **Client Secret**
-7. Under **Authorized redirect URLs**, add exactly:
+3. Open **Auth** and copy the Client ID and Client Secret.
+4. Add this exact redirect URL:
 
 ```text
 http://localhost:8000/callback
 ```
 
-Must match exactly:
+It must use `http`, `localhost`, port `8000`, and no trailing slash.
 
-- `http` not `https`
-- `localhost` not `127.0.0.1`
-- no slash at the end
-- port `8000`
+## 2. Download the project
 
-Wrong URL = `The redirect_uri does not match the registered value`.
-
----
-
-## Files in this project
-
-| File | Purpose |
-| --- | --- |
-| `agent.py` | The whole agent. Paste this into Agentverse **Build**. |
-| `.env` | Your secrets. **Do not share this file.** |
-| `.env.example` | Empty template of the same keys |
-| `linkedin_setup.py` | One-time script that gets the LinkedIn token |
-| `requirements.txt` | Python packages |
-| `README.md` | This workshop guide |
-
----
-
-## Step 1 — Get the code
-
-**Windows**
+Windows PowerShell:
 
 ```powershell
 git clone https://github.com/ShyamRV/demo-linkedin-agent.git
 cd demo-linkedin-agent
 ```
 
-**Mac**
+Mac Terminal:
 
 ```bash
 git clone https://github.com/ShyamRV/demo-linkedin-agent.git
 cd demo-linkedin-agent
 ```
 
-No Git? Download the ZIP from GitHub, unzip it, then open that folder in your terminal.
+## 3. Install Python and packages
 
----
+Python 3.10 or newer is required.
 
-## Step 2 — Check Python (3.10 or newer)
-
-This agent needs **Python 3.10+**.
-
-**Windows**
+Windows:
 
 ```powershell
 python --version
-```
-
-**Mac**
-
-```bash
-python3 --version
-```
-
-You should see `Python 3.10`, `3.11`, or `3.12`.
-
-If you see `3.8`, `3.9`, or `not found`, install Python from [python.org/downloads](https://www.python.org/downloads/). On the Windows installer, tick **Add python.exe to PATH**.
-
----
-
-## Step 3 — Install packages
-
-**Windows**
-
-```powershell
 python -m pip install -r requirements.txt
 ```
 
-**Mac**
+Mac:
 
 ```bash
+python3 --version
 python3 -m pip install -r requirements.txt
 ```
 
-This installs: `uagents`, `openai`, `requests`, `python-dotenv`.
+If the version is below 3.10, install Python from
+[python.org/downloads](https://www.python.org/downloads/).
 
----
+## 4. Create `.env`
 
-## Step 4 — Create `.env`
-
-**Windows**
+Windows:
 
 ```powershell
 copy .env.example .env
 ```
 
-**Mac**
+Mac:
 
 ```bash
 cp .env.example .env
 ```
 
-Open `.env` in any editor and fill these values:
+Fill the new `.env`:
 
 ```env
-# ASI:One  — from https://asi1.ai/developer
-ASI1_API_KEY=sk_your_key_here
+ASI1_API_KEY=your_asi_one_key
 ASI1_BASE_URL=https://api.asi1.ai/v1
+IMAGE_SIZE=1024x1024
+IMAGE_OUTPUT_SIZE=1200
+IMAGE_RETRIES=3
+REQUIRE_IMAGE_ON_PUBLISH=1
 
-# LinkedIn  — leave these empty until Step 5
 LINKEDIN_ACCESS_TOKEN=
 LINKEDIN_AUTHOR_URN=
+LINKEDIN_TOKEN_EXPIRES_AT=0
+LINKEDIN_VERSION=202608
 
-# 18 = 6pm, 5.5 = India (IST)
 POST_HOUR=18
-TIMEZONE_OFFSET=5.5
+POST_MINUTE=0
+TIMEZONE=Asia/Kolkata
 
-# Agent identity
 AGENT_NAME=LinkedIn Buddy
 AGENT_HANDLE=linkedin-buddy
-AGENT_SEED=linkedin-fetchai-poster-seed
+AGENT_SEED=replace-with-a-unique-private-seed
 AGENT_PORT=8001
+ALLOW_INSECURE_SEED=0
 
-# LinkedIn app  — from LinkedIn Developers → Auth
-LINKEDIN_CLIENT_ID=your_client_id
-LINKEDIN_CLIENT_SECRET=your_client_secret
+FETCH_AI_URN=urn:li:organization:27233415
+FETCH_AI_LAB_URN=urn:li:organization:103686899
+SANA_WAJID_URN=
+
+LINKEDIN_CLIENT_ID=your_linkedin_client_id
+LINKEDIN_CLIENT_SECRET=your_linkedin_client_secret
 LINKEDIN_REDIRECT_URI=http://localhost:8000/callback
 ```
 
-Handle must be `linkedin-buddy` (with a hyphen).  
-Do **not** use `linkedin buddy` (space). Agentverse will not accept that.
+Use a unique `AGENT_SEED`. Anyone using the same seed gets the same agent
+identity. The agent **refuses to start** with a placeholder seed unless you set
+`ALLOW_INSECURE_SEED=1` for a local throwaway demo.
 
-Do not put real secrets on GitHub.
+`.env` is ignored by Git and must never be committed.
 
----
+## 5. Get the LinkedIn token
 
-## Step 5 — Get the LinkedIn token
-
-This login is one time. The script writes two values into `.env`:
-
-- `LINKEDIN_ACCESS_TOKEN` — lets the agent post as you
-- `LINKEDIN_AUTHOR_URN` — `urn:li:person:xxxxxxxx`
-
-### 5.1 Run the script
-
-**Windows**
+Windows:
 
 ```powershell
 python linkedin_setup.py
 ```
 
-**Mac**
+Mac:
 
 ```bash
 python3 linkedin_setup.py
 ```
 
-### 5.2 Log in
+The script prints a LinkedIn login URL:
 
-The script prints a URL. Open it, log in to LinkedIn, click **Allow**.
+1. Open it and approve access.
+2. LinkedIn redirects to
+   `http://localhost:8000/callback?code=...`.
+3. The page not loading is expected.
+4. Copy only the value after `code=`.
+5. Paste it into the terminal and press Enter.
 
-### 5.3 Copy the code
+The script saves `LINKEDIN_ACCESS_TOKEN`, `LINKEDIN_AUTHOR_URN`, and the token
+expiration time in `.env`. It prints only a **masked** token preview, never the
+full secret.
 
-LinkedIn opens a page like:
+LinkedIn tokens usually expire after about 60 days. Run the setup script again
+when the token expires.
 
-```text
-http://localhost:8000/callback?code=AQS...
+## 6. Run tests
+
+Tests do not call LinkedIn or publish anything.
+
+Windows:
+
+```powershell
+python -m unittest discover -s tests -v
 ```
 
-The page **will not load**. That is normal.
+Mac:
 
-Copy only the part after `code=` (stop before `&` if you see one).
-
-Paste it into the terminal at `Paste the code here:` and press Enter.
-
-The code expires in a few minutes. If it fails, run the script and log in again.
-
-### 5.4 Check `.env`
-
-You should now see:
-
-```env
-LINKEDIN_ACCESS_TOKEN=AQV...
-LINKEDIN_AUTHOR_URN=urn:li:person:xxxxxxxx
+```bash
+python3 -m unittest discover -s tests -v
 ```
 
-The token lasts about **60 days**. If posting starts failing, run `linkedin_setup.py` again.
+## 7. Run locally
 
-To post as a company page, use `urn:li:organization:YOUR_ID`.
-
----
-
-## Step 6 — Run the agent on your computer
-
-**Windows**
+Windows:
 
 ```powershell
 python agent.py
 ```
 
-**Mac**
+Mac:
 
 ```bash
 python3 agent.py
 ```
 
-Good logs look like this:
+Open the Agent Inspector URL printed in the terminal. Select
+**Connect → Mailbox** so Agentverse can deliver chat messages.
+
+Then send `claim` once so scheduled drafts go to you, not the next stranger who
+chats with a public agent.
+
+## 8. Interactive workflow
+
+Open **Chat with Agent** and send:
 
 ```text
-INFO: [LinkedIn Buddy]: Starting agent with address: agent1q...
-INFO: [LinkedIn Buddy]: Agent inspector available at https://agentverse.ai/inspect/?uri=...
-INFO: [LinkedIn Buddy]: Starting server on http://0.0.0.0:8001
-INFO: [LinkedIn Buddy]: Manifest published successfully: AgentChatProtocol
+create
 ```
 
-Leave this terminal open. Do not close it.
+The form asks for:
 
-| Warning | What it means |
-| --- | --- |
-| `I do not have enough funds to register on Almanac contract` | Safe to ignore |
-| `LinkedIn secrets are empty` | Finish Step 5, then restart |
-| `ASI1_API_KEY is empty` | Add the ASI:One key to `.env`, then restart |
+- Topic
+- Tone
+- Audience
+- Objective
+- Optional source URL
+- Which entities to mention (person mentions stay unchecked by default)
 
----
+After generation, the review card provides:
 
-## Step 7 — Connect the mailbox (needed for chat)
+- **Approve & publish**
+- **Apply edit**
+- **Regenerate**
+- **Cancel**
 
-A local agent cannot receive Agentverse / ASI:One chat until the mailbox is connected.
+Publishing cannot happen until **Approve & publish** is selected.
 
-1. Copy the **Agent inspector** URL from the terminal
-2. Open it in a browser (agent must still be running)
-3. Click **Connect**
-4. Choose **Mailbox**
-
-Then use **Chat with Agent** on Agentverse.
-
----
-
-## Step 8 — Talk to the agent
-
-Use **Chat with Agent** on Agentverse, or ASI:One with **`@linkedin-buddy`**.
-
-| You type | What happens |
-| --- | --- |
-| `help` | Shows commands |
-| `status` | Last post + next 6pm slot |
-| `preview` | Draft today's post (does **not** publish) |
-| `preview about uAgents` | Draft about that topic |
-| `post now` | Write, make image, publish today's post |
-| `post about <topic>` | Write, make image, publish that topic |
-
-**Try `preview` first.** `post now` and `post about` publish for real.
+## 9. Commands
 
 ```text
-preview about Fetch.ai Agentverse and ASI:One
+create
+preview about Agentverse and ASI:One
+settings
+status
+history
+mentions
+claim
+schedule 18:00
+pause
+resume
+```
+
+`post about ...` also creates a draft for approval. It does not publish
+immediately.
+
+Examples:
+
+```text
+preview about the latest Agentverse developer tools
 ```
 
 ```text
-post about Fetch.ai Agentverse and ASI:One
+post about Sana Wajid and the Fetch.ai Innovation Lab
 ```
 
-You can also paste a LinkedIn profile after `post about`.
+The second example creates a draft. Enable the Sana checkbox in the create form
+only if you intentionally want that person mention.
 
----
+## 10. Scheduling
 
-## Step 9 — Host on Agentverse
-
-Use a **Hosted Agent**. Do not use External Integration unless you have a public HTTPS URL.
-
-1. Go to [agentverse.ai](https://agentverse.ai)
-2. Click **Launch an Agent**
-3. Choose **Generate Agent** or a **blank Hosted Agent**
-4. Do **not** choose External Integration (that asks for an Endpoint URL)
-5. Open **Build** and paste all of `agent.py`
-6. Open **`.env` / Secrets** and paste at least:
-   - `LINKEDIN_ACCESS_TOKEN`
-   - `LINKEDIN_AUTHOR_URN`
-   - `POST_HOUR=18`
-   - `TIMEZONE_OFFSET=5.5`
-7. Click **Run**
-
-Hosted agents already get `ASI1_API_KEY`. Extra local settings like `port` and `mailbox` are ignored there. That is normal.
-
-### What is Agent Endpoint URL?
-
-If you see that field, you chose the **external** path by mistake.
-
-It wants a public server address, for example:
+The default schedule is 6:00 PM in `Asia/Kolkata`.
 
 ```text
-https://your-server.com:8000/submit
+schedule 17:30
 ```
 
-`localhost` will not work. Go back and create a **Hosted Agent**.
+This changes the daily draft time to 5:30 PM. The timezone comes from `.env`.
 
----
+At that time the agent:
 
-## Step 10 — Agentverse profile
+1. Generates one draft.
+2. Saves it in Agent Storage.
+3. Sends the **schedule owner** an interactive review card.
+4. Waits for approval.
 
-| Field | Value |
-| --- | --- |
-| **Name** | LinkedIn Buddy |
-| **Handle** | `@linkedin-buddy` (no space) |
-| **Keywords** | fetch.ai, linkedin, uagents, agentverse, asi:one, daily post, linkedin-buddy |
-| **Description** | Posts about Fetch.ai on LinkedIn every day at 6pm. Uses ASI:One for text and images. |
-| **README** | LinkedIn Buddy writes and publishes a daily Fetch.ai LinkedIn post. Say `preview`, `post now`, or `post about <topic>`. |
+Ownership rules:
 
-ASI:One can then find it as **`@linkedin-buddy`**.
+- The first person who chats becomes the owner automatically.
+- Later chatters do not steal ownership.
+- Send `claim` to take ownership intentionally.
 
----
+Use `pause` and `resume` to control scheduled drafts.
 
-## How the agent works
+## 11. Deploy to Agentverse
 
-1. **`agent.py` is the whole agent.** One file, easy to paste into Agentverse.
-2. **`.env` holds secrets.** Local runs load it automatically. On Agentverse, use Secrets.
-3. **Chat Protocol** is enabled with `publish_manifest=True`. That is why it shows as `AgentChatProtocol`.
-4. **ASI:One** writes the text and creates the image.
-5. **LinkedIn** uploads the image and publishes the post.
-6. Every minute the agent checks the clock. At **6:00 PM** it posts once per day.
-7. Chat can also trigger `preview`, `post now`, or `post about ...` any time.
+Create a **Hosted Agent**, not External Integration.
 
----
+1. Open [agentverse.ai](https://agentverse.ai).
+2. Select **Launch an Agent**.
+3. Choose a blank Hosted Agent.
+4. In **Build**, create these files and copy their contents:
+   - `agent.py`
+   - `cards.py`
+   - `config.py`
+   - `content.py`
+   - `linkedin.py`
+   - `visual.py`
+5. In **Secrets**, add the values from `.env`.
+6. Click **Run**.
 
-## Restart after you change `.env`
+Agentverse injects ASI:One credentials for hosted agents, but explicitly adding
+your own ASI:One key is also supported.
 
-Stop the agent with `Ctrl + C`, then run `agent.py` again.
+If Agentverse asks for an **Endpoint URL**, you selected External Integration.
+Go back and choose a Hosted Agent. `localhost` is not a public endpoint.
 
-**Windows**
+## 12. Agentverse listing
 
-```powershell
-python agent.py
+Use:
+
+```text
+Name: LinkedIn Buddy
+Handle: @linkedin-buddy
+Keywords: linkedin, fetch.ai, asi:one, uagents, content, social media
 ```
 
-**Mac**
+Description:
 
-```bash
-python3 agent.py
+```text
+Approval-first LinkedIn assistant that creates posts and images with ASI:One,
+supports interactive review cards, scheduled drafts, and Fetch.ai ecosystem
+mentions.
 ```
 
----
+## How mentions work
+
+1. The draft writer includes organization or person names as plain text.
+2. On publish, LinkedIn Buddy converts matching selected names to `@Name`.
+3. Longer names are handled first so `Fetch.ai Innovation Lab` is not broken by
+   a shorter `Fetch.ai` replacement.
+4. Selected mentions that are missing from the draft are skipped, not appended.
+5. Raw Little Text / URN markup is stripped if it ever appears in model output.
+
+Check configuration through chat:
+
+```text
+mentions
+```
+
+## Images
+
+Every approved publish generates and uploads a high-quality image by default.
+
+ASI:One generates a full square scene. `visual.py` then builds a **full-bleed**
+LinkedIn creative:
+
+- keeps most of the artwork (light corner cleanup only)
+- cover-fits to `IMAGE_OUTPUT_SIZE` (default 1200×1200) without stretching
+- applies a subtle clarity pass
+- adds a soft bottom gradient, headline, and one small mascot
+- validates minimum size before upload
+- retries up to `IMAGE_RETRIES` times if generation is weak or fails
+
+`REQUIRE_IMAGE_ON_PUBLISH=1` (default) blocks the LinkedIn post if a strong
+image cannot be produced. Set it to `0` only if you intentionally want
+text-only fallback.
+
+Prompts ask for premium, sharp, cinematic compositions instead of dumping the
+entire post into the image request. Model corner badges are reduced best-effort;
+always preview before approving a public post.
 
 ## Troubleshooting
 
-| Problem | Fix |
-| --- | --- |
-| `python` not found on Mac | Use `python3` |
-| `python3` not found on Windows | Use `python` |
-| `python` is 3.8 | Install Python 3.12 from python.org. On Windows, tick **Add to PATH** |
-| `linkedin_setup.py is not recognized` (Windows) | Run `python linkedin_setup.py` from the project folder |
-| `Permission denied` (Mac) | Run `python3 linkedin_setup.py` |
-| `redirect_uri does not match` | Add `http://localhost:8000/callback` exactly in the LinkedIn app |
-| Localhost page will not load after LinkedIn login | Normal. Copy `code=` from the address bar |
-| Code expired | Run the setup script and log in again |
-| Chat does not respond | Agent must be running. Local agents also need **Connect → Mailbox** |
-| Agent only replies with help | Say `post about ...` or `post now`. Use `@linkedin-buddy` (hyphen) |
-| `LinkedIn secrets are empty` | Finish Step 5, then restart |
-| Endpoint URL required | You created an External agent. Create a Hosted Agent |
-| 401 from LinkedIn | Token expired. Run `linkedin_setup.py` again |
-| Almanac contract funds warning | Safe to ignore |
+- **`redirect_uri does not match`** — add
+  `http://localhost:8000/callback` exactly in the LinkedIn app.
+- **Callback page does not load** — expected; copy the `code` from the URL.
+- **401 from LinkedIn** — token expired; run `linkedin_setup.py` again.
+- **403 from LinkedIn** — the app lacks the required LinkedIn product/scope.
+- **Refusing to start with placeholder AGENT_SEED** — set a unique seed, or use
+  `ALLOW_INSECURE_SEED=1` for a local demo only.
+- **Chat does not respond locally** — keep the agent running and connect its
+  mailbox from the Inspector.
+- **Scheduled draft does not arrive** — send `claim`, then check that scheduling
+  is not paused.
+- **Mentions look like code** — restart the agent; posts should show `@Name` only.
+- **Agent identity changed** — `AGENT_SEED` changed.
+- **Almanac contract funds warning** — safe to ignore for local testing.
 
----
+## Security
 
-## Workshop checklist
+- Never commit `.env`.
+- Never paste API keys into source code, chat, or screenshots.
+- Use a unique agent seed.
+- Rotate any secret accidentally shown in chat, screenshots, or recordings.
+- `linkedin_setup.py` masks tokens in terminal output; keep it that way.
+- Chat errors are sanitized; full details stay in agent logs.
+- Person mentions stay opt-in for open-source clones.
+- Test with `preview` before approving a real post.
 
-- [ ] Agentverse account
-- [ ] ASI:One API key in `.env`
-- [ ] LinkedIn app with OpenID + Share on LinkedIn
-- [ ] Redirect URL `http://localhost:8000/callback`
-- [ ] Client ID + Secret in `.env`
-- [ ] `linkedin_setup.py` wrote token + URN
-- [ ] Python 3.10+ and packages installed
-- [ ] `agent.py` is running
-- [ ] Inspector → Connect → Mailbox
-- [ ] `preview` works
-- [ ] Hosted Agent on Agentverse with the same secrets
-- [ ] Name **LinkedIn Buddy**, handle **`@linkedin-buddy`**
+## Contributing
 
----
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Useful links
+## Documentation
 
-- Agentverse: [agentverse.ai](https://agentverse.ai)
-- ASI:One keys: [asi1.ai/developer](https://asi1.ai/developer)
-- Chat Protocol: [docs.agentverse.ai](https://docs.agentverse.ai/documentation/getting-started/enable-chat-protocol)
-- LinkedIn apps: [linkedin.com/developers/apps](https://www.linkedin.com/developers/apps)
-- This repo: [github.com/ShyamRV/demo-linkedin-agent](https://github.com/ShyamRV/demo-linkedin-agent)
+- [Agentverse](https://agentverse.ai)
+- [ASI:One developer portal](https://asi1.ai/developer)
+- [Agent Chat Protocol](https://docs.agentverse.ai/documentation/getting-started/enable-chat-protocol)
+- [Interactive cards](https://docs.agentverse.ai/documentation/advanced-usages/agent-driven-interactive-cards)
+- [LinkedIn Posts API](https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/posts-api?view=li-lms-2026-08)
+- [LinkedIn Images API](https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/images-api?view=li-lms-2026-06)

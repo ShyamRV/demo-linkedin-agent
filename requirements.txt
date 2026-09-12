@@ -1,4 +1,6 @@
-uagents
-openai
-requests
-python-dotenv
+uagents>=0.22.0,<1
+openai>=1.40.0,<3
+requests>=2.31.0,<3
+python-dotenv>=1.0.0,<2
+tzdata>=2024.1
+Pillow>=10.0.0,<13

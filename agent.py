@@ -1,21 +1,11 @@
-"""
-Fetch.ai LinkedIn Poster — Agentverse Hosted Agent
+"""LinkedIn Buddy: an approval-first LinkedIn agent for Agentverse."""
 
-Copy agent.py and .env into your Agentverse agent.
-On Agentverse, paste .env values in the editor .env / Secrets tab.
-"""
-
-import os
+import asyncio
 import json
-import base64
 import re
-from datetime import datetime, timezone, timedelta
-from typing import Optional
-from uuid import uuid4
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
 
-import requests
-from dotenv import load_dotenv
-from openai import OpenAI
 from uagents import Agent, Context, Protocol
 from uagents_core.contrib.protocols.chat import (
     ChatAcknowledgement,
@@ -26,315 +16,587 @@ from uagents_core.contrib.protocols.chat import (
     chat_protocol_spec,
 )
 
-load_dotenv()
+from cards import create_post_form, draft_review, settings_form, text_message
+from config import DEFAULT_MENTION_KEYS, SETTINGS, Mention
+from content import ContentService, Draft
+from linkedin import LinkedInClient
 
-# ---------------------------------------------------------------------------
-# Settings  (from .env)
-# ---------------------------------------------------------------------------
-POST_HOUR = int(os.getenv("POST_HOUR", "18"))          # 18 = 6pm
-TIMEZONE_OFFSET = float(os.getenv("TIMEZONE_OFFSET", "5.5"))  # IST
 
-ASI_KEY = os.getenv("ASI1_API_KEY", "")
-ASI_URL = os.getenv("ASI1_BASE_URL", "https://api.asi1.ai/v1")
-
-LINKEDIN_TOKEN = os.getenv("LINKEDIN_ACCESS_TOKEN", "")
-LINKEDIN_AUTHOR = os.getenv("LINKEDIN_AUTHOR_URN", "")  # urn:li:person:xxx
-
-# One topic per day so posts do not repeat
 TOPICS = [
-    "What Fetch.ai is and how autonomous economic agents work",
-    "Building agents with the uAgents Python framework",
-    "Agentverse — hosting, discovering and chatting with agents",
-    "ASI:One — the Fetch.ai LLM that talks to real agents",
-    "The Agent Chat Protocol and multi-agent collaboration",
-    "Real-world Fetch.ai use cases: DeFi, mobility, supply chain",
-    "Why decentralized agent networks matter for the future of AI",
+    "How autonomous agents discover, collaborate, and transact with Fetch.ai",
+    "Building a useful agent with the uAgents framework",
+    "How Agentverse makes agents discoverable through ASI:One",
+    "ASI:One Planner Mode and practical multi-agent workflows",
+    "Combining reusable Agent Skills in the Fetch.ai ecosystem",
+    "What developers learn by building and debugging real agents",
+    "How agentic AI can remove repetitive digital work",
 ]
 
+DEFAULT_PREFERENCES = {
+    "tone": "professional",
+    "audience": "technology leaders, founders, and AI practitioners",
+    "objective": "share a clear professional insight that builds credibility",
+}
 
-# ---------------------------------------------------------------------------
-# Agent + ASI:One
-# Local: uses name/seed/port/mailbox. Agentverse hosted: extra args are ignored.
-# ---------------------------------------------------------------------------
+HELP_TEXT = """I'm LinkedIn Buddy, an approval-first LinkedIn assistant.
+
+I write highly professional Fetch.ai posts: clear insight, credible tone,
+short paragraphs, and no hype.
+
+Commands:
+- create             Open the interactive post form
+- preview about ...  Create a draft for review
+- settings           Set tone, audience, and objective
+- status             Show schedule and pending draft
+- history            Show recent published posts
+- mentions           Show available LinkedIn mentions
+- claim              Become the owner for scheduled drafts
+- schedule 18:00     Change the daily draft time
+- pause / resume     Pause or resume scheduled drafts
+
+Default mentions (only if the name appears in the draft):
+- Fetch.ai
+- Fetch.ai Innovation Lab
+
+Person mentions such as Sana Wajid are opt-in from the create form.
+I never publish a draft until you approve it."""
+
+
+def public_error(error: Exception) -> str:
+    """Keep chat replies free of secrets and stack noise."""
+    name = type(error).__name__
+    text = str(error).strip() or "unexpected error"
+    text = re.sub(r"Bearer\s+\S+", "Bearer [redacted]", text, flags=re.I)
+    text = re.sub(
+        r"(api[_-]?key|access[_-]?token|client[_-]?secret)\s*[:=]\s*\S+",
+        r"\1=[redacted]",
+        text,
+        flags=re.I,
+    )
+    if len(text) > 220:
+        text = text[:217] + "..."
+    return f"{name}: {text}"
+
+
+def remember_owner(ctx: Context, sender: str) -> None:
+    """Keep the first chatter as schedule owner unless they run `claim`."""
+    if not ctx.storage.get("owner_sender"):
+        ctx.storage.set("owner_sender", sender)
+
+
+def claim_owner(ctx: Context, sender: str) -> None:
+    ctx.storage.set("owner_sender", sender)
+
+
 agent = Agent(
-    name=os.getenv("AGENT_NAME", "LinkedIn Buddy"),
-    handle=os.getenv("AGENT_HANDLE", "linkedin-buddy"),
-    seed=os.getenv("AGENT_SEED", "linkedin-fetchai-poster-seed"),
-    port=int(os.getenv("AGENT_PORT", "8001")),
+    name=SETTINGS.agent_name,
+    handle=SETTINGS.agent_handle,
+    seed=SETTINGS.agent_seed,
+    port=SETTINGS.agent_port,
     mailbox=True,
     publish_agent_details=True,
-    description="LinkedIn Buddy posts about Fetch.ai and people in the ecosystem every day at 6pm.",
+    description=(
+        "Approval-first LinkedIn assistant using ASI:One, interactive cards, "
+        "scheduled drafts, and Fetch.ai ecosystem mentions."
+    ),
 )
-
-asi = OpenAI(base_url=ASI_URL, api_key=ASI_KEY)
-
-# Agent Chat Protocol — required so Agentverse / ASI:One can talk to this agent
 protocol = Protocol(spec=chat_protocol_spec)
 
 
-def now_local() -> datetime:
-    return datetime.now(timezone(timedelta(hours=TIMEZONE_OFFSET)))
-
-
-def today() -> str:
-    return now_local().strftime("%Y-%m-%d")
-
-
-# ---------------------------------------------------------------------------
-# ASI:One — write the LinkedIn post
-# ---------------------------------------------------------------------------
-def write_post(topic: str) -> tuple[str, str]:
-    """Returns (linkedin_text, image_prompt)."""
-    date = now_local().strftime("%A, %d %B %Y")
-
-    reply = asi.chat.completions.create(
-        model="asi1",
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You write LinkedIn posts. "
-                    "Reply with ONLY valid JSON, no markdown:\n"
-                    '{"post": "...", "image_prompt": "..."}\n'
-                    "post: 120-180 words, professional, human, no markdown. "
-                    "If the topic is a person or profile, write about them and "
-                    "naturally mention Fetch.ai / agentic AI where it fits. "
-                    "Otherwise write about Fetch.ai. "
-                    "End with 4-6 hashtags including #FetchAI #uAgents #Agentverse #ASI.\n"
-                    "image_prompt: one sentence, clean professional visual, "
-                    "teal and purple, abstract agent network, NO text, NO logos."
-                ),
-            },
-            {
-                "role": "user",
-                "content": f"Today is {date}. Write a LinkedIn post about:\n{topic}",
-            },
-        ],
-        max_tokens=800,
-        temperature=0.8,
+def content_service() -> ContentService:
+    if not SETTINGS.asi_key:
+        raise ValueError("ASI1_API_KEY is missing")
+    return ContentService(
+        SETTINGS.asi_key,
+        SETTINGS.asi_url,
+        image_size=SETTINGS.image_size,
+        image_output_size=SETTINGS.image_output_size,
+        image_retries=SETTINGS.image_retries,
     )
 
-    raw = (reply.choices[0].message.content or "").strip()
-    if raw.startswith("```"):
-        raw = raw.strip("`")
-        raw = raw.replace("json", "", 1).strip()
 
-    data = json.loads(raw)
-    return data["post"].strip(), data["image_prompt"].strip()
-
-
-# ---------------------------------------------------------------------------
-# ASI:One — generate the image (returns raw bytes)
-# ---------------------------------------------------------------------------
-def make_image(prompt: str) -> bytes:
-    response = requests.post(
-        f"{ASI_URL.rstrip('/')}/image/generate",
-        headers={
-            "Authorization": f"Bearer {ASI_KEY}",
-            "Content-Type": "application/json",
-        },
-        json={"model": "asi1", "prompt": prompt, "size": "1024x1024"},
-        timeout=90,
-    )
-    response.raise_for_status()
-    data = response.json()
-
-    image = data.get("image") or data.get("image_url") or data.get("url")
-    items = data.get("data") or []
-    if not image and items:
-        image = items[0].get("url") or items[0].get("b64_json")
-        if items[0].get("b64_json") and not str(image).startswith("http"):
-            return base64.b64decode(items[0]["b64_json"])
-
-    if not image:
-        raise RuntimeError(f"ASI:One returned no image: {data}")
-
-    if str(image).startswith("data:"):
-        return base64.b64decode(image.split(",", 1)[1])
-    if str(image).startswith("http"):
-        return requests.get(image, timeout=60).content
-    return base64.b64decode(image)
-
-
-# ---------------------------------------------------------------------------
-# LinkedIn — upload image + publish
-# ---------------------------------------------------------------------------
-def _li_headers() -> dict:
-    return {
-        "Authorization": f"Bearer {LINKEDIN_TOKEN}",
-        "Content-Type": "application/json",
-        "X-Restli-Protocol-Version": "2.0.0",
-    }
-
-
-def upload_image(image: bytes) -> str:
-    register = requests.post(
-        "https://api.linkedin.com/v2/assets?action=registerUpload",
-        headers=_li_headers(),
-        json={
-            "registerUploadRequest": {
-                "recipes": ["urn:li:digitalmediaRecipe:feedshare-image"],
-                "owner": LINKEDIN_AUTHOR,
-                "serviceRelationships": [
-                    {
-                        "relationshipType": "OWNER",
-                        "identifier": "urn:li:userGeneratedContent",
-                    }
-                ],
-            }
-        },
-        timeout=30,
-    )
-    register.raise_for_status()
-    value = register.json()["value"]
-    upload_url = value["uploadMechanism"][
-        "com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest"
-    ]["uploadUrl"]
-    asset = value["asset"]
-
-    kind = "image/jpeg" if image[:3] == b"\xff\xd8\xff" else "image/png"
-    put = requests.put(
-        upload_url,
-        headers={"Authorization": f"Bearer {LINKEDIN_TOKEN}", "Content-Type": kind},
-        data=image,
-        timeout=60,
-    )
-    put.raise_for_status()
-    return asset
-
-
-def publish_linkedin(text: str, image: Optional[bytes]) -> str:
-    share = {
-        "shareCommentary": {"text": text},
-        "shareMediaCategory": "NONE",
-    }
-    if image:
-        asset = upload_image(image)
-        share = {
-            "shareCommentary": {"text": text},
-            "shareMediaCategory": "IMAGE",
-            "media": [
-                {"status": "READY", "media": asset, "title": {"text": "Fetch.ai"}}
-            ],
-        }
-
-    response = requests.post(
-        "https://api.linkedin.com/v2/ugcPosts",
-        headers=_li_headers(),
-        json={
-            "author": LINKEDIN_AUTHOR,
-            "lifecycleState": "PUBLISHED",
-            "specificContent": {"com.linkedin.ugc.ShareContent": share},
-            "visibility": {
-                "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"
-            },
-        },
-        timeout=30,
-    )
-    response.raise_for_status()
-    return response.headers.get("x-restli-id", "published")
-
-
-# ---------------------------------------------------------------------------
-# Create + publish one post
-# ---------------------------------------------------------------------------
-def run_daily_post(ctx: Context, topic: Optional[str] = None) -> str:
-    if not ASI_KEY:
-        return "Missing ASI1_API_KEY. Agentverse normally injects this for you."
-    if not LINKEDIN_TOKEN or not LINKEDIN_AUTHOR:
-        return (
-            "Missing LinkedIn secrets. Add LINKEDIN_ACCESS_TOKEN and "
-            "LINKEDIN_AUTHOR_URN in the Agentverse Secrets tab."
+def linkedin_client() -> LinkedInClient:
+    if not SETTINGS.linkedin_token or not SETTINGS.linkedin_author:
+        raise ValueError(
+            "LINKEDIN_ACCESS_TOKEN or LINKEDIN_AUTHOR_URN is missing"
         )
+    return LinkedInClient(
+        SETTINGS.linkedin_token,
+        SETTINGS.linkedin_author,
+        SETTINGS.linkedin_version,
+    )
 
-    if not topic:
-        topic = TOPICS[now_local().timetuple().tm_yday % len(TOPICS)]
-    ctx.logger.info(f"Writing post about: {topic}")
 
-    text, image_prompt = write_post(topic)
-    ctx.logger.info(f"Post ready ({len(text)} chars)")
+def storage_key(kind: str, sender: str) -> str:
+    return f"{kind}:{sender}"
 
-    image = None
+
+def get_preferences(ctx: Context, sender: str) -> Dict:
+    saved = ctx.storage.get(storage_key("preferences", sender)) or {}
+    return {**DEFAULT_PREFERENCES, **saved}
+
+
+def get_draft(ctx: Context, sender: str) -> Optional[Draft]:
+    value = ctx.storage.get(storage_key("draft", sender))
+    return Draft.from_dict(value) if value else None
+
+
+def save_draft(ctx: Context, sender: str, draft: Draft) -> None:
+    ctx.storage.set(storage_key("draft", sender), draft.to_dict())
+
+
+def clear_draft(ctx: Context, sender: str) -> None:
+    ctx.storage.set(storage_key("draft", sender), None)
+
+
+def get_schedule(ctx: Context) -> Dict:
+    return ctx.storage.get("schedule") or {
+        "hour": SETTINGS.post_hour,
+        "minute": SETTINGS.post_minute,
+        "paused": False,
+        "timezone": SETTINGS.timezone_name,
+    }
+
+
+def truthy(value) -> bool:
+    return value is True or str(value).lower() in {"true", "1", "yes", "on"}
+
+
+def selected_mention_keys(data: Dict, default_all: bool = True) -> List[str]:
+    present = any(key in data for key in ("tag_fetch", "tag_lab", "tag_sana"))
+    if not present and default_all:
+        return list(DEFAULT_MENTION_KEYS)
+
+    keys = []
+    if truthy(data.get("tag_fetch")):
+        keys.append("fetch")
+    if truthy(data.get("tag_lab")):
+        keys.append("lab")
+    if truthy(data.get("tag_sana")):
+        keys.append("sana")
+    return keys
+
+
+def mention_by_key(key: str) -> Optional[Mention]:
+    return next(
+        (item for item in SETTINGS.mentions() if item.key == key),
+        None,
+    )
+
+
+def mention_names(keys: List[str]) -> List[str]:
+    return [
+        mention.name
+        for key in keys
+        if (mention := mention_by_key(key)) is not None
+    ]
+
+
+def unresolved_mentions(keys: List[str]) -> str:
+    notes = []
+    for key in keys:
+        mention = mention_by_key(key)
+        if mention is None:
+            continue
+        if not mention.urn and mention.key == "sana":
+            notes.append(
+                f"@{mention.name} is opt-in visible text only; set "
+                "SANA_WAJID_URN only if you have consent to mention them."
+            )
+    return " ".join(notes)
+
+
+def message_text(msg: ChatMessage) -> str:
+    if hasattr(msg, "text") and msg.text():
+        return msg.text()
+    return "".join(
+        item.text for item in msg.content if isinstance(item, TextContent)
+    )
+
+
+def clean_message(text: str) -> str:
+    text = re.sub(r"^@agent1[a-z0-9]+\s+", "", text, flags=re.IGNORECASE)
+    return re.sub(
+        r"^@linkedin-buddy\s+", "", text, flags=re.IGNORECASE
+    ).strip()
+
+
+def parse_selection(text: str) -> Dict:
     try:
-        image = make_image(image_prompt)
-        ctx.logger.info(f"Image ready ({len(image)} bytes)")
-    except Exception as err:
-        ctx.logger.warning(f"Image failed, posting text only: {err}")
+        value = json.loads(text)
+        return value if isinstance(value, dict) else {}
+    except (TypeError, ValueError):
+        lowered = text.lower()
+        for action, words in {
+            "publish": ("approve", "publish", "confirm"),
+            "regenerate": ("regenerate", "generate again"),
+            "cancel": ("cancel", "reject"),
+            "revise": ("revise", "apply edit", "edit"),
+            "create_draft": ("generate draft",),
+        }.items():
+            if any(word in lowered for word in words):
+                return {"action": action}
+    return {}
 
-    post_id = publish_linkedin(text, image)
-    ctx.storage.set("last_post_date", today())
-    ctx.storage.set("last_post_text", text)
-    ctx.storage.set("last_post_id", post_id)
-    ctx.logger.info(f"Published: {post_id}")
-    return f"Published to LinkedIn.\n\n{text}"
+
+async def build_draft(
+    ctx: Context,
+    sender: str,
+    topic: str,
+    tone: Optional[str] = None,
+    audience: Optional[str] = None,
+    objective: Optional[str] = None,
+    keys: Optional[List[str]] = None,
+    source_url: str = "",
+    scheduled: bool = False,
+) -> Draft:
+    preferences = get_preferences(ctx, sender)
+    selected = keys if keys is not None else list(DEFAULT_MENTION_KEYS)
+    draft = await asyncio.to_thread(
+        content_service().create_draft,
+        topic,
+        tone or preferences["tone"],
+        audience or preferences["audience"],
+        objective or preferences["objective"],
+        mention_names(selected),
+        source_url,
+        scheduled,
+    )
+    draft.mention_keys = selected
+    save_draft(ctx, sender, draft)
+    return draft
+
+
+async def send_draft(ctx: Context, sender: str, draft: Draft) -> None:
+    await ctx.send(
+        sender,
+        draft_review(draft, unresolved_mentions(draft.mention_keys)),
+    )
+
+
+async def publish_draft(
+    ctx: Context,
+    sender: str,
+    requested_id: str = "",
+) -> None:
+    draft = get_draft(ctx, sender)
+    if not draft:
+        await ctx.send(sender, text_message("There is no pending draft."))
+        return
+    if requested_id and requested_id != draft.id:
+        await ctx.send(
+            sender,
+            text_message("That review card is old. Open the latest draft."),
+        )
+        return
+    if draft.status == "publishing":
+        await ctx.send(sender, text_message("This draft is already publishing."))
+        return
+
+    draft.status = "publishing"
+    save_draft(ctx, sender, draft)
+    await ctx.send(
+        sender,
+        text_message(
+            "Approved. Generating a high-quality image and publishing now..."
+        ),
+    )
+
+    try:
+        generated = await asyncio.to_thread(
+            content_service().generate_image_for_draft,
+            draft,
+        )
+        image = generated.data
+        if not image:
+            raise RuntimeError("Image generation returned empty bytes")
+    except Exception as error:
+        draft.status = "pending"
+        save_draft(ctx, sender, draft)
+        ctx.logger.exception("High-quality image generation failed")
+        if SETTINGS.require_image_on_publish:
+            await ctx.send(
+                sender,
+                text_message(
+                    "Publish blocked: a high-quality image is required for "
+                    "every post. Draft is still pending — try Approve again. "
+                    f"({public_error(error)})"
+                ),
+            )
+            return
+        await ctx.send(
+            sender,
+            text_message(
+                "Image generation failed and text-only publish is allowed by "
+                f"config. Continuing without an image. ({public_error(error)})"
+            ),
+        )
+        image = None
+
+    try:
+        post_id = await asyncio.to_thread(
+            linkedin_client().publish,
+            draft.post,
+            image,
+            draft.mention_keys,
+            SETTINGS.mentions(),
+            draft.visual_headline or draft.image_prompt,
+        )
+    except Exception:
+        draft.status = "pending"
+        save_draft(ctx, sender, draft)
+        raise
+
+    draft.status = "published"
+    history = ctx.storage.get("history") or []
+    history.insert(
+        0,
+        {
+            "id": draft.id,
+            "post_id": post_id,
+            "topic": draft.topic,
+            "published_at": datetime.now(timezone.utc).isoformat(),
+            "had_image": bool(image),
+        },
+    )
+    ctx.storage.set("history", history[:20])
+    ctx.storage.set("last_post_date", SETTINGS.now().date().isoformat())
+    clear_draft(ctx, sender)
+    await ctx.send(
+        sender,
+        text_message(
+            "Published successfully with a high-quality image.\n"
+            f"Post ID: {post_id}"
+            if image
+            else f"Published successfully (text-only).\nPost ID: {post_id}"
+        ),
+    )
+
+
+async def handle_action(
+    ctx: Context,
+    sender: str,
+    data: Dict,
+) -> bool:
+    action = data.get("action")
+    if not action:
+        return False
+
+    if action == "create_draft":
+        topic = str(data.get("topic", "")).strip()
+        if not topic:
+            await ctx.send(sender, text_message("Please provide a topic."))
+            return True
+        keys = selected_mention_keys(data)
+        draft = await build_draft(
+            ctx,
+            sender,
+            topic,
+            str(
+                data.get("tone")
+                or data.get("default_tone")
+                or DEFAULT_PREFERENCES["tone"]
+            ),
+            str(
+                data.get("audience")
+                or data.get("default_audience")
+                or DEFAULT_PREFERENCES["audience"]
+            ),
+            str(
+                data.get("objective")
+                or data.get("default_objective")
+                or DEFAULT_PREFERENCES["objective"]
+            ),
+            keys,
+            str(data.get("source_url", "")).strip(),
+        )
+        await send_draft(ctx, sender, draft)
+        return True
+
+    if action == "publish":
+        await publish_draft(ctx, sender, str(data.get("draft_id", "")))
+        return True
+
+    if action == "cancel":
+        clear_draft(ctx, sender)
+        await ctx.send(sender, text_message("Draft cancelled. Nothing posted."))
+        return True
+
+    if action in {"revise", "regenerate"}:
+        draft = get_draft(ctx, sender)
+        if not draft:
+            await ctx.send(sender, text_message("There is no pending draft."))
+            return True
+        instruction = str(data.get("edit_instruction", "")).strip()
+        tone = str(data.get("tone", "")).strip() or draft.tone
+        if action == "revise" and not instruction:
+            await ctx.send(
+                sender,
+                text_message(
+                    "Add an edit instruction in the review card first."
+                ),
+            )
+            return True
+        if action == "regenerate":
+            instruction = "Rewrite it with a fresh hook and structure."
+        draft = await asyncio.to_thread(
+            content_service().revise_draft,
+            draft,
+            instruction,
+            tone,
+        )
+        save_draft(ctx, sender, draft)
+        await send_draft(ctx, sender, draft)
+        return True
+
+    if action == "save_settings":
+        preferences = {
+            "tone": str(
+                data.get("tone")
+                or data.get("current_tone")
+                or DEFAULT_PREFERENCES["tone"]
+            ),
+            "audience": str(
+                data.get("audience")
+                or data.get("current_audience")
+                or DEFAULT_PREFERENCES["audience"]
+            ),
+            "objective": str(
+                data.get("objective")
+                or data.get("current_objective")
+                or DEFAULT_PREFERENCES["objective"]
+            ),
+        }
+        ctx.storage.set(storage_key("preferences", sender), preferences)
+        await ctx.send(sender, text_message("Preferences saved."))
+        return True
+
+    return False
+
+
+def status_text(ctx: Context, sender: str) -> str:
+    schedule = get_schedule(ctx)
+    draft = get_draft(ctx, sender)
+    state = "paused" if schedule["paused"] else "active"
+    pending = (
+        f"{draft.id} — {draft.topic}" if draft else "none"
+    )
+    owner = ctx.storage.get("owner_sender") or "unset (chat once or run claim)"
+    you_own = "yes" if owner == sender else "no"
+    return (
+        f"Schedule: {schedule['hour']:02d}:{schedule['minute']:02d} "
+        f"{schedule['timezone']} ({state})\n"
+        f"Schedule owner: {owner}\n"
+        f"You are owner: {you_own}\n"
+        f"Pending draft: {pending}\n"
+        f"Last published date: "
+        f"{ctx.storage.get('last_post_date') or 'never'}"
+    )
+
+
+def history_text(ctx: Context) -> str:
+    history = ctx.storage.get("history") or []
+    if not history:
+        return "No posts have been published by this agent yet."
+    lines = ["Recent posts:"]
+    for item in history[:5]:
+        lines.append(
+            f"- {item['published_at'][:10]} · {item['topic']} "
+            f"({item['post_id']})"
+        )
+    return "\n".join(lines)
+
+
+def mentions_text() -> str:
+    lines = [
+        "Available mentions:",
+        "Names become @Name only when they already appear in the draft.",
+        "Nothing is appended for selected mentions that are missing from the text.",
+        "",
+    ]
+    for mention in SETTINGS.mentions():
+        mode = "ready" if mention.urn else "visible @Name only"
+        lines.append(f"- @{mention.name} ({mode})\n  {mention.url}")
+    lines.append(
+        "\nPerson mentions stay unchecked by default. Only enable them "
+        "when you intend to mention that person."
+    )
+    return "\n".join(lines)
 
 
 @agent.on_event("startup")
 async def on_startup(ctx: Context):
     ctx.logger.info(f"LinkedIn Buddy started at {agent.address}")
-    if not ASI_KEY:
-        ctx.logger.warning("ASI1_API_KEY is empty - add it to .env")
-    if not LINKEDIN_TOKEN or not LINKEDIN_AUTHOR:
-        ctx.logger.warning(
-            "LinkedIn secrets are empty - add LINKEDIN_ACCESS_TOKEN and "
-            "LINKEDIN_AUTHOR_URN to .env"
+    if SETTINGS.has_weak_seed():
+        ctx.logger.error(
+            "AGENT_SEED is a shared placeholder. Set a unique seed before "
+            "deployment. Local demos can set ALLOW_INSECURE_SEED=1."
         )
+    if not SETTINGS.asi_key:
+        ctx.logger.warning("ASI1_API_KEY is missing")
+    if not SETTINGS.linkedin_token or not SETTINGS.linkedin_author:
+        ctx.logger.warning("LinkedIn credentials are missing")
+    elif SETTINGS.linkedin_token_expires_at:
+        seconds_left = (
+            SETTINGS.linkedin_token_expires_at
+            - int(datetime.now(timezone.utc).timestamp())
+        )
+        if seconds_left < 7 * 24 * 60 * 60:
+            ctx.logger.warning(
+                "LinkedIn token expires within 7 days; run "
+                "linkedin_setup.py again"
+            )
 
 
-# ---------------------------------------------------------------------------
-# 6pm daily check  (runs every 60 seconds, posts once per day)
-# ---------------------------------------------------------------------------
 @agent.on_interval(period=60.0)
-async def daily_6pm(ctx: Context):
-    now = now_local()
-    if now.hour != POST_HOUR:
+async def scheduled_draft(ctx: Context):
+    schedule = get_schedule(ctx)
+    if schedule.get("paused"):
         return
-    if ctx.storage.get("last_post_date") == today():
+    now = SETTINGS.now()
+    if now.hour != schedule["hour"] or now.minute != schedule["minute"]:
         return
 
-    ctx.logger.info("It is 6pm — posting to LinkedIn")
+    date_key = now.date().isoformat()
+    if ctx.storage.get("last_scheduled_draft_date") == date_key:
+        return
+    owner = ctx.storage.get("owner_sender")
+    if not owner:
+        ctx.logger.warning(
+            "Cannot send scheduled draft until a user chats with the agent"
+        )
+        return
+
+    # Lock before the API call so overlapping interval invocations cannot
+    # create duplicate drafts.
+    ctx.storage.set("last_scheduled_draft_date", date_key)
+    topic = TOPICS[now.timetuple().tm_yday % len(TOPICS)]
     try:
-        run_daily_post(ctx)
-    except Exception as err:
-        ctx.logger.error(f"Daily post failed: {err}")
-
-
-# ---------------------------------------------------------------------------
-# Chat Protocol  (Agentverse + ASI:One)
-# ---------------------------------------------------------------------------
-HELP_TEXT = (
-    "I'm LinkedIn Buddy (@linkedin-buddy). "
-    "I post about Fetch.ai on LinkedIn every day at 6:00 PM.\n\n"
-    "You can say:\n"
-    "• post now — publish today's Fetch.ai post\n"
-    "• post about <topic or profile> — write and publish that\n"
-    "• preview — write a post without publishing\n"
-    "• preview about <topic> — draft only\n"
-    "• status — last post and next schedule"
-)
-
-
-def create_text_chat(text: str, end_session: bool = False) -> ChatMessage:
-    content = [TextContent(type="text", text=text)]
-    if end_session:
-        content.append(EndSessionContent(type="end-session"))
-    return ChatMessage(
-        timestamp=datetime.utcnow(),
-        msg_id=uuid4(),
-        content=content,
-    )
-
-
-def message_text(msg: ChatMessage) -> str:
-    if hasattr(msg, "text"):
-        text = msg.text()
-        if text:
-            return text
-    text = ""
-    for part in msg.content:
-        if isinstance(part, TextContent):
-            text += part.text
-    return text
+        draft = await build_draft(
+            ctx,
+            owner,
+            topic,
+            keys=list(DEFAULT_MENTION_KEYS),
+            scheduled=True,
+        )
+        await ctx.send(
+            owner,
+            text_message(
+                "Your scheduled draft is ready. It will not publish without "
+                "your approval."
+            ),
+        )
+        await send_draft(ctx, owner, draft)
+    except Exception as error:
+        ctx.storage.set("last_scheduled_draft_date", None)
+        ctx.logger.exception("Scheduled draft failed")
+        await ctx.send(
+            owner,
+            text_message(
+                "Scheduled draft failed. Check the agent logs. "
+                f"({public_error(error)})"
+            ),
+        )
 
 
 @protocol.on_message(ChatMessage)
@@ -342,80 +604,147 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
     await ctx.send(
         sender,
         ChatAcknowledgement(
-            timestamp=datetime.now(), acknowledged_msg_id=msg.msg_id
+            timestamp=datetime.now(timezone.utc),
+            acknowledged_msg_id=msg.msg_id,
         ),
     )
+    remember_owner(ctx, sender)
 
-    for part in msg.content:
-        if isinstance(part, StartSessionContent):
-            ctx.logger.info(f"New chat session from {sender}")
-            await ctx.send(sender, create_text_chat(HELP_TEXT))
-            return
-        if isinstance(part, EndSessionContent):
-            ctx.logger.info(f"Chat session ended by {sender}")
-            return
+    if any(isinstance(item, EndSessionContent) for item in msg.content):
+        return
+    if any(isinstance(item, StartSessionContent) for item in msg.content):
+        await ctx.send(sender, text_message(HELP_TEXT))
+        await ctx.send(sender, create_post_form(get_preferences(ctx, sender)))
+        return
 
-    text = message_text(msg).strip()
-    text = re.sub(r"^@agent1[a-z0-9]+\s+", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^@linkedin-buddy\s+", "", text, flags=re.IGNORECASE)
+    text = clean_message(message_text(msg))
     if not text:
         return
 
-    lowered = text.lower()
-    ctx.logger.info(f"Chat from {sender}: {text}")
-
     try:
-        if lowered in ("status", "help"):
-            if lowered == "help":
-                await ctx.send(sender, create_text_chat(HELP_TEXT))
-                return
-            last = ctx.storage.get("last_post_date") or "never"
+        selection = parse_selection(text)
+        if await handle_action(ctx, sender, selection):
+            return
+
+        lowered = text.lower()
+        if lowered in {"hi", "hello", "help", "start", "create", "new post"}:
+            await ctx.send(sender, text_message(HELP_TEXT))
             await ctx.send(
                 sender,
-                create_text_chat(
-                    f"Last post: {last}\n"
-                    f"Next auto-post: today {POST_HOUR}:00 "
-                    f"(offset {TIMEZONE_OFFSET}h)\n"
-                    f"Today's topic: {TOPICS[now_local().timetuple().tm_yday % len(TOPICS)]}"
+                create_post_form(get_preferences(ctx, sender)),
+            )
+            return
+        if lowered == "settings":
+            await ctx.send(
+                sender,
+                settings_form(get_preferences(ctx, sender)),
+            )
+            return
+        if lowered == "status":
+            await ctx.send(sender, text_message(status_text(ctx, sender)))
+            return
+        if lowered == "history":
+            await ctx.send(sender, text_message(history_text(ctx)))
+            return
+        if lowered == "mentions":
+            await ctx.send(sender, text_message(mentions_text()))
+            return
+        if lowered == "claim":
+            claim_owner(ctx, sender)
+            await ctx.send(
+                sender,
+                text_message(
+                    "You are now the schedule owner. Daily drafts will be "
+                    "sent here."
+                ),
+            )
+            return
+        if lowered == "pause":
+            schedule = get_schedule(ctx)
+            schedule["paused"] = True
+            ctx.storage.set("schedule", schedule)
+            await ctx.send(sender, text_message("Scheduled drafts paused."))
+            return
+        if lowered == "resume":
+            schedule = get_schedule(ctx)
+            schedule["paused"] = False
+            ctx.storage.set("schedule", schedule)
+            await ctx.send(sender, text_message("Scheduled drafts resumed."))
+            return
+
+        schedule_match = re.fullmatch(
+            r"schedule\s+([01]?\d|2[0-3]):([0-5]\d)",
+            lowered,
+        )
+        if schedule_match:
+            schedule = get_schedule(ctx)
+            schedule["hour"] = int(schedule_match.group(1))
+            schedule["minute"] = int(schedule_match.group(2))
+            ctx.storage.set("schedule", schedule)
+            await ctx.send(
+                sender,
+                text_message(
+                    f"Daily draft time set to "
+                    f"{schedule['hour']:02d}:{schedule['minute']:02d} "
+                    f"{schedule['timezone']}."
                 ),
             )
             return
 
-        if lowered.startswith("preview"):
-            topic = re.sub(r"^preview(\s+about)?\s*", "", text, flags=re.IGNORECASE).strip()
-            if not topic:
-                topic = TOPICS[now_local().timetuple().tm_yday % len(TOPICS)]
-            post, _ = write_post(topic)
-            await ctx.send(sender, create_text_chat(f"Preview (not posted):\n\n{post}"))
+        topic_match = re.match(
+            r"^(?:preview|draft|post)(?:\s+now)?(?:\s+about)?\s+(.+)$",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if topic_match:
+            topic = topic_match.group(1).strip()
+            draft = await build_draft(
+                ctx,
+                sender,
+                topic,
+                keys=list(DEFAULT_MENTION_KEYS),
+            )
+            await send_draft(ctx, sender, draft)
             return
 
-        if lowered in ("post now", "publish") or lowered.startswith("post"):
-            topic = re.sub(r"^post(\s+now)?(\s+about)?\s*", "", text, flags=re.IGNORECASE).strip()
-            result = run_daily_post(ctx, topic or None)
-            await ctx.send(sender, create_text_chat(result))
-            return
-
-        # Any other longer message is treated as a custom post topic
         if len(text) > 40:
-            result = run_daily_post(ctx, text)
-            await ctx.send(sender, create_text_chat(result))
-        else:
-            await ctx.send(sender, create_text_chat(HELP_TEXT))
-    except Exception as err:
-        ctx.logger.exception("Error handling chat")
+            draft = await build_draft(
+                ctx,
+                sender,
+                text,
+                keys=list(DEFAULT_MENTION_KEYS),
+            )
+            await send_draft(ctx, sender, draft)
+            return
+
+        await ctx.send(sender, text_message(HELP_TEXT))
+    except Exception as error:
+        ctx.logger.exception("Chat request failed")
         await ctx.send(
             sender,
-            create_text_chat(f"Something went wrong: {err}"),
+            text_message(
+                "Request failed. Check the agent logs for details. "
+                f"({public_error(error)})"
+            ),
         )
 
 
 @protocol.on_message(ChatAcknowledgement)
-async def handle_ack(ctx: Context, sender: str, msg: ChatAcknowledgement):
+async def handle_ack(
+    ctx: Context,
+    sender: str,
+    msg: ChatAcknowledgement,
+):
     pass
 
 
-# publish_manifest=True registers AgentChatProtocol on Agentverse
 agent.include(protocol, publish_manifest=True)
 
 if __name__ == "__main__":
+    if SETTINGS.has_weak_seed() and not SETTINGS.allow_insecure_seed:
+        raise SystemExit(
+            "Refusing to start with a placeholder AGENT_SEED.\n"
+            "Set a unique AGENT_SEED in .env, or set ALLOW_INSECURE_SEED=1 "
+            "for a local throwaway demo."
+        )
     agent.run()

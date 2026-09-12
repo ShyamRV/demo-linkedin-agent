@@ -5,4 +5,8 @@ __pycache__/
 venv/
 *.mp4
 *_data.json
-
+.pytest_cache/
+.mypy_cache/
+.DS_Store
+*.png
+!docs/**/*.png
