@@ -170,7 +170,7 @@ This installs: `uagents`, `openai`, `requests`, `python-dotenv`.
 **Windows**
 
 ```powershell
-copy .env.example .env
+cp .env.example .env
 ```
 
 **Mac**
