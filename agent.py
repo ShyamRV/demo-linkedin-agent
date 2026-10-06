@@ -87,40 +87,57 @@ def write_post(topic: str) -> tuple[str, str]:
     """Returns (linkedin_text, image_prompt)."""
     date = now_local().strftime("%A, %d %B %Y")
 
-    reply = asi.chat.completions.create(
-        model="asi1",
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You write LinkedIn posts. "
-                    "Reply with ONLY valid JSON, no markdown:\n"
-                    '{"post": "...", "image_prompt": "..."}\n'
-                    "post: 120-180 words, professional, human, no markdown. "
-                    "If the topic is a person or profile, write about them and "
-                    "naturally mention Fetch.ai / agentic AI where it fits. "
-                    "Otherwise write about Fetch.ai. "
-                    "End with 4-6 hashtags including #FetchAI #uAgents #Agentverse #ASI.\n"
-                    "image_prompt: one sentence, clean professional visual, "
-                    "teal and purple, abstract agent network, NO text, NO logos."
-                ),
-            },
-            {
-                "role": "user",
-                "content": f"Today is {date}. Write a LinkedIn post about:\n{topic}",
-            },
-        ],
-        max_tokens=800,
-        temperature=0.8,
-    )
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You write LinkedIn posts. "
+                "Reply with ONLY valid JSON, no markdown:\n"
+                '{"post": "...", "image_prompt": "..."}\n'
+                "post: 120-180 words, professional, human, no markdown. "
+                "If the topic is a person or profile, write about them and "
+                "naturally mention Fetch.ai / agentic AI where it fits. "
+                "Otherwise write about Fetch.ai. "
+                "End with 4-6 hashtags including #FetchAI #uAgents #Agentverse #ASI.\n"
+                "image_prompt: one sentence, clean professional visual, "
+                "teal and purple, abstract agent network, NO text, NO logos."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"Today is {date}. Write a LinkedIn post about:\n{topic}",
+        },
+    ]
 
-    raw = (reply.choices[0].message.content or "").strip()
-    if raw.startswith("```"):
-        raw = raw.strip("`")
-        raw = raw.replace("json", "", 1).strip()
+    last_error = None
+    for attempt in range(3):
+        reply = asi.chat.completions.create(
+            model="asi1",
+            messages=messages,
+            max_tokens=1200,
+            temperature=0.6,
+        )
+        raw = (reply.choices[0].message.content or "").strip()
+        if raw.startswith("```"):
+            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw).strip()
 
-    data = json.loads(raw)
-    return data["post"].strip(), data["image_prompt"].strip()
+        try:
+            data = json.loads(raw)
+            post = str(data["post"]).strip()
+            image_prompt = str(data["image_prompt"]).strip()
+            if not post or not image_prompt:
+                raise ValueError("ASI:One returned an empty field")
+            return post, image_prompt
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as err:
+            last_error = err
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "Your previous response was invalid. Return complete valid JSON only.",
+                }
+            )
+
+    raise RuntimeError(f"ASI:One returned invalid JSON after 3 attempts: {last_error}")
 
 
 # ---------------------------------------------------------------------------
@@ -159,79 +176,79 @@ def make_image(prompt: str) -> bytes:
 # ---------------------------------------------------------------------------
 # LinkedIn — upload image + publish
 # ---------------------------------------------------------------------------
+# Versioned REST APIs replace /v2/assets and /v2/ugcPosts.
+# https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/images-api
+LINKEDIN_VERSION = "202609"
+
+
 def _li_headers() -> dict:
     return {
         "Authorization": f"Bearer {LINKEDIN_TOKEN}",
         "Content-Type": "application/json",
         "X-Restli-Protocol-Version": "2.0.0",
+        "Linkedin-Version": LINKEDIN_VERSION,
     }
+
+
+def _raise_for_linkedin(response: requests.Response) -> None:
+    if response.ok:
+        return
+    body = (response.text or "").strip().replace("\n", " ")[:400]
+    raise requests.HTTPError(
+        f"{response.status_code} {response.reason} for {response.url}: {body}",
+        response=response,
+    )
 
 
 def upload_image(image: bytes) -> str:
     register = requests.post(
-        "https://api.linkedin.com/v2/assets?action=registerUpload",
+        "https://api.linkedin.com/rest/images?action=initializeUpload",
         headers=_li_headers(),
-        json={
-            "registerUploadRequest": {
-                "recipes": ["urn:li:digitalmediaRecipe:feedshare-image"],
-                "owner": LINKEDIN_AUTHOR,
-                "serviceRelationships": [
-                    {
-                        "relationshipType": "OWNER",
-                        "identifier": "urn:li:userGeneratedContent",
-                    }
-                ],
-            }
-        },
+        json={"initializeUploadRequest": {"owner": LINKEDIN_AUTHOR}},
         timeout=30,
     )
-    register.raise_for_status()
+    _raise_for_linkedin(register)
     value = register.json()["value"]
-    upload_url = value["uploadMechanism"][
-        "com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest"
-    ]["uploadUrl"]
-    asset = value["asset"]
+    upload_url = value["uploadUrl"]
+    image_urn = value["image"]
 
     kind = "image/jpeg" if image[:3] == b"\xff\xd8\xff" else "image/png"
     put = requests.put(
         upload_url,
-        headers={"Authorization": f"Bearer {LINKEDIN_TOKEN}", "Content-Type": kind},
+        headers={"Content-Type": kind},
         data=image,
         timeout=60,
     )
-    put.raise_for_status()
-    return asset
+    _raise_for_linkedin(put)
+    return image_urn
 
 
 def publish_linkedin(text: str, image: Optional[bytes]) -> str:
-    share = {
-        "shareCommentary": {"text": text},
-        "shareMediaCategory": "NONE",
+    body = {
+        "author": LINKEDIN_AUTHOR,
+        "commentary": text,
+        "visibility": "PUBLIC",
+        "distribution": {
+            "feedDistribution": "MAIN_FEED",
+            "targetEntities": [],
+            "thirdPartyDistributionChannels": [],
+        },
+        "lifecycleState": "PUBLISHED",
+        "isReshareDisabledByAuthor": False,
     }
     if image:
-        asset = upload_image(image)
-        share = {
-            "shareCommentary": {"text": text},
-            "shareMediaCategory": "IMAGE",
-            "media": [
-                {"status": "READY", "media": asset, "title": {"text": "Fetch.ai"}}
-            ],
+        image_urn = upload_image(image)
+        body["content"] = {
+            "media": {"id": image_urn, "altText": "Fetch.ai"}
         }
 
     response = requests.post(
-        "https://api.linkedin.com/v2/ugcPosts",
+        "https://api.linkedin.com/rest/posts",
         headers=_li_headers(),
-        json={
-            "author": LINKEDIN_AUTHOR,
-            "lifecycleState": "PUBLISHED",
-            "specificContent": {"com.linkedin.ugc.ShareContent": share},
-            "visibility": {
-                "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"
-            },
-        },
+        json=body,
         timeout=30,
     )
-    response.raise_for_status()
+    _raise_for_linkedin(response)
     return response.headers.get("x-restli-id", "published")
 
 
@@ -291,7 +308,11 @@ async def daily_6pm(ctx: Context):
         return
     if ctx.storage.get("last_post_date") == today():
         return
+    if ctx.storage.get("last_attempt_date") == today():
+        return
 
+    # Only try once automatically; a failure can still be retried from chat.
+    ctx.storage.set("last_attempt_date", today())
     ctx.logger.info("It is 6pm — posting to LinkedIn")
     try:
         run_daily_post(ctx)
@@ -389,8 +410,13 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
             await ctx.send(sender, create_text_chat(f"Preview (not posted):\n\n{post}"))
             return
 
-        if lowered in ("post now", "publish") or lowered.startswith("post"):
-            topic = re.sub(r"^post(\s+now)?(\s+about)?\s*", "", text, flags=re.IGNORECASE).strip()
+        if lowered.startswith(("post", "publish")):
+            topic = re.sub(
+                r"^(?:post(?:\s+now)?(?:\s+about)?|publish)\s*",
+                "",
+                text,
+                flags=re.IGNORECASE,
+            ).strip(" —-:•�")
             result = run_daily_post(ctx, topic or None)
             await ctx.send(sender, create_text_chat(result))
             return
