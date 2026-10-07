@@ -634,3 +634,76 @@ git pull origin main
 ```
 
 Then recreate `.venv` with Python 3.11 as above.
+
+### Exact commands from Git Bash (Windows)
+
+Open **Git Bash** and copy these commands one block at a time.
+
+#### 1) Pull the latest project
+
+```bash
+cd ~
+git clone https://github.com/ShyamRV/demo-linkedin-agent.git
+cd demo-linkedin-agent
+```
+
+If you already cloned it:
+
+```bash
+cd ~/demo-linkedin-agent
+git pull origin main
+```
+
+#### 2) Download Python 3.11 from Git Bash
+
+```bash
+cd ~
+curl -L -o python-3.11.9-amd64.exe https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe
+```
+
+#### 3) Install Python 3.11 (adds PATH + py launcher)
+
+```bash
+./python-3.11.9-amd64.exe /quiet InstallAllUsers=0 PrependPath=1 Include_launcher=1 Include_test=0
+```
+
+Close Git Bash, open a **new** Git Bash window, then check:
+
+```bash
+py -3.11 --version
+```
+
+You should see `Python 3.11.9`.
+
+#### 4) Create venv and install uagents for this project
+
+```bash
+cd ~/demo-linkedin-agent
+py -3.11 -m venv .venv
+source .venv/Scripts/activate
+python --version
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+#### 5) Run the agent
+
+```bash
+python linkedin_setup.py
+python agent.py
+```
+
+#### One-block recovery (if Python is already installed as 3.11)
+
+Use this only when `py -3.11 --version` already works:
+
+```bash
+cd ~/demo-linkedin-agent
+git pull origin main
+rm -rf .venv
+py -3.11 -m venv .venv
+source .venv/Scripts/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python agent.py
+```
