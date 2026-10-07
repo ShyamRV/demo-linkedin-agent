@@ -125,9 +125,9 @@ No Git? Download the ZIP from GitHub, unzip it, then open that folder in your te
 
 ---
 
-## Step 2 — Check Python (3.10 or newer)
+## Step 2 — Check Python (use 3.11)
 
-This agent needs **Python 3.10+**.
+This workshop is set up for **Python 3.11**.
 
 **Windows**
 
@@ -141,9 +141,9 @@ python --version
 python3 --version
 ```
 
-You should see `Python 3.10`, `3.11`, or `3.12`.
+You should see `Python 3.11.x`.
 
-If you see `3.8`, `3.9`, or `not found`, install Python from [python.org/downloads](https://www.python.org/downloads/). On the Windows installer, tick **Add python.exe to PATH**.
+If you see another version, or `uagents` fails later, jump to **Fix Python for uAgents** at the end of this README.
 
 ---
 
@@ -424,7 +424,7 @@ python3 agent.py
 | --- | --- |
 | `python` not found on Mac | Use `python3` |
 | `python3` not found on Windows | Use `python` |
-| `python` is 3.8 | Install Python 3.12 from python.org. On Windows, tick **Add to PATH** |
+| `python` is not 3.11 / `uagents` fails to install | Follow **Fix Python for uAgents** at the end of this README |
 | `linkedin_setup.py is not recognized` (Windows) | Run `python linkedin_setup.py` from the project folder |
 | `Permission denied` (Mac) | Run `python3 linkedin_setup.py` |
 | `redirect_uri does not match` | Add `http://localhost:8000/callback` exactly in the LinkedIn app |
@@ -447,7 +447,7 @@ python3 agent.py
 - [ ] Redirect URL `http://localhost:8000/callback`
 - [ ] Client ID + Secret in `.env`
 - [ ] `linkedin_setup.py` wrote token + URN
-- [ ] Python 3.10+ and packages installed
+- [ ] Python **3.11** and packages installed
 - [ ] `agent.py` is running
 - [ ] Inspector → Connect → Mailbox
 - [ ] `preview` works
@@ -463,3 +463,174 @@ python3 agent.py
 - Chat Protocol: [docs.agentverse.ai](https://docs.agentverse.ai/documentation/getting-started/enable-chat-protocol)
 - LinkedIn apps: [linkedin.com/developers/apps](https://www.linkedin.com/developers/apps)
 - This repo: [github.com/ShyamRV/demo-linkedin-agent](https://github.com/ShyamRV/demo-linkedin-agent)
+
+---
+
+## Fix Python for uAgents (use Python 3.11)
+
+Use this section if `uagents` will not install, `agent.py` crashes on import, or your machine has the wrong Python version.
+
+This workshop works best with **one Python: 3.11**.
+
+### Why this happens
+
+Many students have several Pythons installed (3.8, 3.9, 3.12, Store apps, Anaconda).  
+Then `python` points to the wrong one, and `uagents` fails.
+
+### Step A — Check what you have now
+
+**Windows (PowerShell)**
+
+```powershell
+python --version
+where.exe python
+py -0p
+```
+
+**Mac**
+
+```bash
+python3 --version
+which -a python3
+```
+
+You want `Python 3.11.x`.
+
+### Step B — Install Python 3.11
+
+Download from the official page:
+
+- Python 3.11 releases: [python.org/downloads/release/python-3119](https://www.python.org/downloads/release/python-3119/)
+- Or open [python.org/downloads](https://www.python.org/downloads/) and choose **Python 3.11.x**
+
+**Windows**
+
+1. Download **Windows installer (64-bit)**
+2. Run the installer
+3. Tick **Add python.exe to PATH**
+4. Click **Install Now**
+5. Close and reopen PowerShell / Git Bash
+
+**Mac**
+
+1. Download **macOS 64-bit universal2 installer**
+2. Install it
+3. Close and reopen Terminal
+
+### Step C — Confirm 3.11 is the active Python
+
+**Windows**
+
+```powershell
+py -3.11 --version
+python --version
+```
+
+If `python --version` is still wrong, always use:
+
+```powershell
+py -3.11
+```
+
+**Mac**
+
+```bash
+python3.11 --version
+```
+
+### Step D — Create a clean virtual environment for this project
+
+Do this inside the project folder:
+
+```text
+demo-linkedin-agent
+```
+
+**Windows**
+
+```powershell
+cd demo-linkedin-agent
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python --version
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+If PowerShell blocks activation, run this once:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+Then activate again:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+**Mac**
+
+```bash
+cd demo-linkedin-agent
+python3.11 -m venv .venv
+source .venv/bin/activate
+python --version
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+You should see `Python 3.11.x` after activation.
+
+### Step E — Run the agent with that environment
+
+Keep the venv activated, then:
+
+```powershell
+python linkedin_setup.py
+python agent.py
+```
+
+On Mac, same commands after `source .venv/bin/activate`.
+
+### Step F — If it still fails, remove the old broken environment
+
+**Windows**
+
+```powershell
+deactivate
+Remove-Item -Recurse -Force .venv
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
+
+**Mac**
+
+```bash
+deactivate
+rm -rf .venv
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+### Quick checks
+
+| Check | Expected |
+| --- | --- |
+| `python --version` inside `.venv` | `Python 3.11.x` |
+| `python -m pip show uagents` | Shows package info |
+| `python agent.py` | Agent starts on your `AGENT_PORT` |
+
+### Extra tips for workshop machines
+
+- Prefer **python.org** installers. Avoid mixing Anaconda + Store Python + random old installs for this demo.
+- Always activate `.venv` before running `agent.py`.
+- If classmates already pulled the repo, they only need:
+
+```powershell
+git pull origin main
+```
+
+Then recreate `.venv` with Python 3.11 as above.
